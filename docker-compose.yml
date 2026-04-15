@@ -1,0 +1,24 @@
+services:
+  litert-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: litert-openai-server
+    ports:
+      - "8000:8000"
+    environment:
+      - LITERT_MODEL_DOWNLOAD_DIR=/models
+      - LITERT_MODEL_PATH=/models/gemma-4-E2B-it.litertlm
+      - LITERT_MODEL_SCAN_SUBDIR=
+      - PORT=8000
+      - PYTHONPATH=/app
+    volumes:
+      - ./models:/models
+      - ./static:/app/static
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v1/model/status"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
