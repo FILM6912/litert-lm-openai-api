@@ -26,5 +26,6 @@ class ChatCompletionRequest(BaseModel):
     model: str
     messages: list[ChatMessage]
     tools: list[ChatTool] | None = None
+    tool_choice: str | dict[str, Any] | None = None
     stream: bool = False
     temperature: float | None = None

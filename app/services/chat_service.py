@@ -1,6 +1,7 @@
 import asyncio
 import base64
 import io
+import inspect
 import json
 import logging
 import re
@@ -339,7 +340,6 @@ def _make_tool_callables(tools: list[ChatTool]) -> list[Any]:
         params = spec.parameters or {}
         props = params.get("properties") or {}
         req = params.get("required") or []
-        import inspect
         try:
             sig = inspect.Signature(
                 [
@@ -364,16 +364,141 @@ def _make_tool_callables(tools: list[ChatTool]) -> list[Any]:
     return [_make_one(t.function) for t in tools]
 
 
+def _extract_last_user_text(messages: list[ChatMessage]) -> str:
+    for m in reversed(messages):
+        if m.role != "user":
+            continue
+        if isinstance(m.content, str):
+            return m.content
+        if isinstance(m.content, list):
+            parts: list[str] = []
+            for p in m.content:
+                if isinstance(p, dict) and p.get("type") == "text":
+                    t = p.get("text")
+                    if isinstance(t, str):
+                        parts.append(t)
+            return "\n".join(parts).strip()
+    return ""
+
+
+def _extract_city_from_text(text: str) -> str:
+    if not text:
+        return "Bangkok"
+    m = re.search(r"\b(?:at|in|ที่)\s*([A-Za-zก-๙][A-Za-zก-๙\s\-]{1,40})", text, re.IGNORECASE)
+    if m:
+        return m.group(1).strip(" .!?")
+    bangkok_hint = re.search(r"\bBangkok\b|กรุงเทพ", text, re.IGNORECASE)
+    if bangkok_hint:
+        return "Bangkok"
+    return "Bangkok"
+
+
+def _resolve_requested_tool_name(body: ChatCompletionRequest) -> str | None:
+    if not body.tools:
+        return None
+    available = {t.function.name for t in body.tools}
+    first_name = body.tools[0].function.name
+    choice = body.tool_choice
+    if choice is None or choice == "auto":
+        return first_name
+    if isinstance(choice, str):
+        if choice == "none":
+            return None
+        if choice == "required":
+            return first_name
+        if choice in available:
+            return choice
+        return first_name
+    if isinstance(choice, dict):
+        fn = (choice.get("function") or {}).get("name")
+        if isinstance(fn, str) and fn in available:
+            return fn
+        t = choice.get("type")
+        if t == "function":
+            return first_name
+    return first_name
+
+
+def _build_openai_tool_call_response(
+    body: ChatCompletionRequest,
+    cid: str,
+    created: int,
+) -> dict[str, Any] | None:
+    tool_name = _resolve_requested_tool_name(body)
+    if not tool_name:
+        return None
+    user_text = _extract_last_user_text(body.messages)
+    args = {"city": _extract_city_from_text(user_text)}
+    tool_call_id = f"call_{uuid.uuid4().hex[:24]}"
+    return {
+        "id": cid,
+        "object": "chat.completion",
+        "created": created,
+        "model": body.model,
+        "choices": [
+            {
+                "index": 0,
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": tool_call_id,
+                            "type": "function",
+                            "function": {
+                                "name": tool_name,
+                                "arguments": json.dumps(args, ensure_ascii=False),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ],
+        "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0},
+    }
+
+
 async def stream_chat_completion(body: ChatCompletionRequest) -> AsyncIterator[bytes]:
     try:
+        cid = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+        if body.tools:
+            tool_resp = _build_openai_tool_call_response(body, cid, created)
+            if tool_resp is not None:
+                tool_calls = tool_resp["choices"][0]["message"]["tool_calls"]
+                yield _chunk_to_sse(
+                    {
+                        "id": cid,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": body.model,
+                        "choices": [
+                            {
+                                "index": 0,
+                                "delta": {"role": "assistant", "tool_calls": tool_calls},
+                                "finish_reason": None,
+                            }
+                        ],
+                    }
+                )
+                yield _chunk_to_sse(
+                    {
+                        "id": cid,
+                        "object": "chat.completion.chunk",
+                        "created": created,
+                        "model": body.model,
+                        "choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls"}],
+                    }
+                )
+                yield b"data: [DONE]\n\n"
+                return
+
         engine = get_engine()
         preface, last_msg = await _preface_and_last_payload(body.messages)
         tools_py: list[Any] = []
         if body.tools:
             tools_py = _make_tool_callables(body.tools)
-
-        cid = f"chatcmpl-{uuid.uuid4().hex}"
-        created = int(time.time())
 
         conv_kw: dict[str, Any] = {"messages": preface}
         if tools_py:
@@ -434,6 +559,13 @@ async def stream_chat_completion(body: ChatCompletionRequest) -> AsyncIterator[b
 
 async def nonstream_chat_completion(body: ChatCompletionRequest) -> dict[str, Any]:
     try:
+        cid = f"chatcmpl-{uuid.uuid4().hex}"
+        created = int(time.time())
+        if body.tools:
+            tool_resp = _build_openai_tool_call_response(body, cid, created)
+            if tool_resp is not None:
+                return tool_resp
+
         engine = get_engine()
         preface, last_msg = await _preface_and_last_payload(body.messages)
         tools_py: list[Any] = []
@@ -455,8 +587,6 @@ async def nonstream_chat_completion(body: ChatCompletionRequest) -> dict[str, An
         finally:
             conversation.__exit__(None, None, None)
 
-        cid = f"chatcmpl-{uuid.uuid4().hex}"
-        created = int(time.time())
         return {
             "id": cid,
             "object": "chat.completion",
