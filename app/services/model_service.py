@@ -3,70 +3,68 @@ import httpx
 import litert_lm
 
 from app.core.config import MODEL_DOWNLOAD_ROOT
-from app.core.engine import (
-    _engine,
-    _engine_lock,
-    _active_model_path,
-    _model_id,
-    _explicit_unload,
-    resolve_path,
-)
+import app.core.engine as core_engine
 from app.services.catalog_service import invalidate_model_catalog_cache
 
 
 def load_model(path: str, model_id: str | None = None) -> dict[str, bool | str]:
-    global _engine, _active_model_path, _model_id, _explicit_unload
-    resolved = resolve_path(path)
+    resolved = core_engine.resolve_path(path)
     if not os.path.isfile(resolved):
         raise FileNotFoundError(f"ไม่พบไฟล์โมเดล: {resolved}")
-    with _engine_lock:
-        if _engine is not None:
+    with core_engine._engine_lock:
+        if core_engine._engine is not None:
             try:
-                _engine.__exit__(None, None, None)
+                core_engine._engine.__exit__(None, None, None)
             finally:
-                _engine = None
-        _active_model_path = resolved
+                core_engine._engine = None
+        core_engine._active_model_path = resolved
         if model_id is not None:
-            _model_id = model_id
+            core_engine._model_id = model_id
         else:
-            _model_id = os.path.splitext(os.path.basename(resolved))[0]
-        _engine = litert_lm.Engine(
-            resolved,
-            backend=litert_lm.Backend.CPU,
-            audio_backend=litert_lm.Backend.CPU,
-            vision_backend=litert_lm.Backend.CPU,
-        )
-        _explicit_unload = False
+            core_engine._model_id = os.path.splitext(os.path.basename(resolved))[0]
+        try:
+            core_engine._engine = litert_lm.Engine(
+                resolved,
+                backend=litert_lm.Backend.CPU,
+                audio_backend=litert_lm.Backend.CPU,
+                vision_backend=litert_lm.Backend.CPU,
+            )
+        except Exception as e:
+            import logging
+            logging.error(f"เกิดข้อผิดพลาดขณะโหลดโมเดล: {e}")
+            raise HTTPException(
+                500, detail=f"เกิดข้อผิดพลาดในการโหลดโมเดล: {str(e)}"
+            )
+        core_engine._explicit_unload = False
     invalidate_model_catalog_cache()
     return {
         "ok": True,
         "loaded": True,
         "path": resolved,
-        "model_id": _model_id,
+        "model_id": core_engine._model_id,
     }
 
 
 def unload_model() -> dict[str, bool | str]:
-    global _engine, _explicit_unload
-    with _engine_lock:
-        if _engine is not None:
+    with core_engine._engine_lock:
+        if core_engine._engine is not None:
             try:
-                _engine.__exit__(None, None, None)
+                core_engine._engine.__exit__(None, None, None)
             finally:
-                _engine = None
-        _explicit_unload = True
+                core_engine._engine = None
+        core_engine._explicit_unload = True
     invalidate_model_catalog_cache()
     return {
         "ok": True,
         "loaded": False,
-        "active_model_path": _active_model_path,
-        "model_id": _model_id,
+        "active_model_path": core_engine._active_model_path,
+        "model_id": core_engine._model_id,
         "note": "เรียก POST /v1/model/load ก่อนใช้ /v1/chat/completions",
     }
 
 
 async def download_model(url: str, path: str) -> dict[str, bool | str | int]:
-    dest = resolve_path(path)
+    dest = core_engine.resolve_path(path)
     parent = os.path.dirname(dest)
     if parent:
         os.makedirs(parent, exist_ok=True)
@@ -90,9 +88,9 @@ async def download_model(url: str, path: str) -> dict[str, bool | str | int]:
 
 def get_status() -> dict[str, bool | str]:
     return {
-        "engine_in_memory": _engine is not None,
-        "must_load_before_chat": _explicit_unload,
-        "active_model_path": _active_model_path,
-        "model_id": _model_id,
+        "engine_in_memory": core_engine._engine is not None,
+        "must_load_before_chat": core_engine._explicit_unload,
+        "active_model_path": core_engine._active_model_path,
+        "model_id": core_engine._model_id,
         "download_root": MODEL_DOWNLOAD_ROOT,
     }

@@ -3,7 +3,7 @@ from typing import Any
 
 from fastapi import APIRouter
 
-from app.core.engine import _model_id
+import app.core.engine as core_engine
 from app.services import async_merged_catalog_entries
 
 router = APIRouter()
@@ -25,7 +25,7 @@ async def list_models():
     if not data:
         data = [
             {
-                "id": _model_id,
+                "id": core_engine._model_id,
                 "object": "model",
                 "created": created,
                 "owned_by": "litert-lm",

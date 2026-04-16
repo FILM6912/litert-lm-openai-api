@@ -10,7 +10,7 @@ from app.core.config import (
     LITERT_SCAN_SUBDIR,
     MODEL_DOWNLOAD_ROOT,
 )
-from app.core.engine import _active_model_path, _engine, _model_id
+import app.core.engine as core_engine
 from app.core.security import require_admin
 from app.schemas.model import ModelDownloadRequest, ModelLoadRequest
 from app.services import (
@@ -27,10 +27,10 @@ router = APIRouter()
 @router.get("/model/status")
 def model_status():
     return {
-        "engine_in_memory": _engine is not None,
-        "must_load_before_chat": False,
-        "active_model_path": _active_model_path,
-        "model_id": _model_id,
+        "engine_in_memory": core_engine._engine is not None,
+        "must_load_before_chat": core_engine._explicit_unload,
+        "active_model_path": core_engine._active_model_path,
+        "model_id": core_engine._model_id,
         "download_root": MODEL_DOWNLOAD_ROOT,
         "admin_auth_required": bool(ADMIN_TOKEN),
     }
@@ -46,10 +46,10 @@ async def model_catalog():
         "scan_subdir": LITERT_SCAN_SUBDIR or None,
         "scan_max_depth": LITERT_SCAN_MAX_DEPTH,
         "scan_timeout_sec": LITERT_CATALOG_SCAN_TIMEOUT,
-        "active_model_path": _active_model_path,
-        "engine_in_memory": _engine is not None,
-        "must_load_before_chat": False,
-        "model_id": _model_id,
+        "active_model_path": core_engine._active_model_path,
+        "engine_in_memory": core_engine._engine is not None,
+        "must_load_before_chat": core_engine._explicit_unload,
+        "model_id": core_engine._model_id,
         "scan_timed_out": timed_out,
         "catalog_from_cache": from_cache,
     }

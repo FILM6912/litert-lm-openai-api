@@ -41,12 +41,19 @@ def get_engine() -> litert_lm.Engine:
                 raise HTTPException(
                     503, detail=f"ไม่พบไฟล์โมเดล: {_active_model_path}"
                 )
-            _engine = litert_lm.Engine(
-                _active_model_path,
-                backend=litert_lm.Backend.CPU,
-                audio_backend=litert_lm.Backend.CPU,
-                vision_backend=litert_lm.Backend.CPU,
-            )
+            try:
+                _engine = litert_lm.Engine(
+                    _active_model_path,
+                    backend=litert_lm.Backend.CPU,
+                    audio_backend=litert_lm.Backend.CPU,
+                    vision_backend=litert_lm.Backend.CPU,
+                )
+            except Exception as e:
+                import logging
+                logging.error(f"เกิดข้อผิดพลาดขณะโหลดโมเดล: {e}")
+                raise HTTPException(
+                    500, detail=f"เกิดข้อผิดพลาดในการโหลดโมเดล: {str(e)}"
+                )
         return _engine
 
 
