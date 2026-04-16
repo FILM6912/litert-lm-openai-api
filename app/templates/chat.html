@@ -101,6 +101,15 @@
     .msg.assistant .bubble th { background: rgba(255,255,255,0.05); }
     .msg.assistant .bubble blockquote { border-left: 3px solid var(--muted); margin: 0.5rem 0; padding-left: 0.75rem; color: var(--muted); }
     .msg.assistant .bubble.streaming { border-color: var(--accent); box-shadow: 0 0 0 1px rgba(16, 163, 127, 0.25); }
+    .tool-call-block { background: rgba(16, 163, 127, 0.08); border: 1px solid rgba(16, 163, 127, 0.3); border-radius: 8px; padding: 0.6rem 0.8rem; margin: 0.5rem 0; font-size: 0.82rem; }
+    .tool-call-block .tool-name { color: var(--accent); font-weight: 600; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .tool-call-block .tool-args { color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 0.78rem; white-space: pre-wrap; word-break: break-all; margin-top: 0.3rem; }
+    .tool-call-block .tool-status { display: inline-flex; align-items: center; gap: 0.3rem; margin-top: 0.3rem; font-size: 0.75rem; }
+    .tool-call-block .tool-status .spinner { width: 12px; height: 12px; border: 2px solid var(--accent); border-top-color: transparent; border-radius: 50%; animation: spin 0.8s linear infinite; display: inline-block; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+    .audio-player-inline { display: flex; align-items: center; gap: 0.5rem; background: rgba(0,0,0,0.2); padding: 0.5rem 0.8rem; border-radius: 8px; margin: 0.4rem 0; border: 1px solid var(--border); }
+    .audio-player-inline audio { height: 32px; }
+    .audio-player-inline .audio-label { font-size: 0.8rem; color: var(--muted); }
     .bubble.err-bubble { border-color: var(--err) !important; color: #fecaca !important; background: #2a1515 !important; }
     .chat-welcome {
       margin: auto; text-align: center; color: var(--muted); font-size: 0.88rem; max-width: 360px; line-height: 1.5; padding: 2rem 1rem;
@@ -508,7 +517,7 @@
     return "gemma-litert";
   }
 
-  async function parseSseStream(response, onDelta) {
+  async function parseSseStream(response, onDelta, onToolCall, onFinish) {
     const reader = response.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
@@ -526,8 +535,13 @@
           if (d === "[DONE]") return Math.round(performance.now() - t0);
           try {
             const j = JSON.parse(d);
-            const ch = j.choices && j.choices[0] && j.choices[0].delta && j.choices[0].delta.content;
-            if (ch) onDelta(ch);
+            const ch = j.choices && j.choices[0];
+            if (ch && ch.delta) {
+              if (ch.delta.content) onDelta(ch.delta.content);
+              if (ch.delta.tool_calls && onToolCall) onToolCall(ch.delta.tool_calls);
+            }
+            if (ch && ch.finish_reason === "tool_calls" && onFinish) onFinish("tool_calls");
+            if (ch && ch.finish_reason === "stop" && onFinish) onFinish("stop");
           } catch {}
         }
       }
@@ -624,7 +638,7 @@
           const b64 = att.dataUrl.split(",")[1];
           const ext = att.mime.split("/")[1] || "mp3";
           userContent.push({ type: "input_audio", input_audio: { data: b64, format: ext } });
-          mediaHtml += `<div style="background:rgba(0,0,0,0.2);padding:0.5rem 0.8rem;border-radius:8px;font-size:0.8rem;display:flex;align-items:center;gap:0.5rem;border:1px solid var(--border);"><svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M12 3v9.28a4.39 4.39 0 0 0-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg> ${att.file.name}</div>`;
+          mediaHtml += `<div class="audio-player-inline"><svg width="16" height="16" fill="currentColor" viewBox="0 0 24 24"><path d="M12 3v9.28a4.39 4.39 0 0 0-1.5-.28C8.01 12 6 14.01 6 16.5S8.01 21 10.5 21c2.31 0 4.2-1.75 4.45-4H15V6h4V3h-7z"/></svg><span class="audio-label">${att.file.name}</span></div>`;
         }
       });
       mediaHtml += "</div>";
@@ -642,10 +656,11 @@
     const assistantBubble = appendMessageBubble("assistant", "");
     assistantBubble.classList.add("streaming");
     const url = apiBase() + "/v1/chat/completions";
-    const messages = buildApiMessages();
     $("btnSend").disabled = true;
     let assistantText = "";
+    let collectedToolCalls = {};
     try {
+      const messages = buildApiMessages();
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -656,22 +671,88 @@
         throw new Error(res.status + " " + t.slice(0, 500));
       }
       if (stream) {
-        const ms = await parseSseStream(res, function (delta) {
-          assistantText += delta;
-          assistantBubble.innerHTML = typeof marked !== 'undefined' ? marked.parse(assistantText) : assistantText;
-          scrollChatToBottom();
-        });
-        meta.textContent = "สิ้นสุดใน " + ms + " ms";
+        const ms = await parseSseStream(res,
+          function (delta) {
+            assistantText += delta;
+            assistantBubble.innerHTML = typeof marked !== 'undefined' ? marked.parse(assistantText) : assistantText;
+            scrollChatToBottom();
+          },
+          function (toolCalls) {
+            for (const tc of toolCalls) {
+              const idx = tc.index || 0;
+              if (!collectedToolCalls[idx]) {
+                collectedToolCalls[idx] = { id: tc.id || "", name: "", arguments: "" };
+              }
+              if (tc.id) collectedToolCalls[idx].id = tc.id;
+              if (tc.function) {
+                if (tc.function.name) collectedToolCalls[idx].name += tc.function.name;
+                if (tc.function.arguments) collectedToolCalls[idx].arguments += tc.function.arguments;
+              }
+            }
+            let toolHtml = "";
+            for (const idx of Object.keys(collectedToolCalls).sort()) {
+              const tc = collectedToolCalls[idx];
+              let argsDisplay = tc.arguments;
+              try { argsDisplay = JSON.stringify(JSON.parse(tc.arguments), null, 2); } catch {}
+              toolHtml += `<div class="tool-call-block"><span class="tool-name">🔧 ${tc.name || "tool"}</span><div class="tool-args">${argsDisplay.replace(/</g,"&lt;")}</div><div class="tool-status"><span class="spinner"></span> กำลังเรียกใช้งาน...</div></div>`;
+            }
+            assistantBubble.innerHTML = toolHtml + (assistantText ? (typeof marked !== 'undefined' ? marked.parse(assistantText) : assistantText) : "");
+            scrollChatToBottom();
+          },
+          function (reason) {
+            if (reason === "tool_calls" && Object.keys(collectedToolCalls).length > 0) {
+              let toolHtml = "";
+              const toolCallsArr = [];
+              for (const idx of Object.keys(collectedToolCalls).sort()) {
+                const tc = collectedToolCalls[idx];
+                let argsDisplay = tc.arguments;
+                try { argsDisplay = JSON.stringify(JSON.parse(tc.arguments), null, 2); } catch {}
+                toolHtml += `<div class="tool-call-block"><span class="tool-name">🔧 ${tc.name || "tool"}</span><div class="tool-args">${argsDisplay.replace(/</g,"&lt;")}</div><div class="tool-status" style="color:var(--accent);">✓ เสร็จสิ้น</div></div>`;
+                toolCallsArr.push({
+                  id: tc.id,
+                  type: "function",
+                  function: { name: tc.name, arguments: tc.arguments }
+                });
+              }
+              assistantBubble.innerHTML = toolHtml + (assistantText ? (typeof marked !== 'undefined' ? marked.parse(assistantText) : assistantText) : "");
+              chatHistory.push({ role: "assistant", content: null, tool_calls: toolCallsArr });
+            }
+          }
+        );
+        if (Object.keys(collectedToolCalls).length > 0 && !assistantText) {
+          const toolCallsArr = [];
+          for (const idx of Object.keys(collectedToolCalls).sort()) {
+            const tc = collectedToolCalls[idx];
+            toolCallsArr.push({ id: tc.id, type: "function", function: { name: tc.name, arguments: tc.arguments } });
+          }
+          chatHistory.push({ role: "assistant", content: null, tool_calls: toolCallsArr });
+        } else if (!Object.keys(collectedToolCalls).length) {
+          chatHistory.push({ role: "assistant", content: assistantText });
+        }
+        meta.textContent = "สิ้นสุดใน " + ms + " ms" + (Object.keys(collectedToolCalls).length ? " · เรียกใช้ tool " + Object.keys(collectedToolCalls).length + " ครั้ง" : "");
       } else {
         const j = await res.json();
-        const content = j.choices && j.choices[0] && j.choices[0].message && j.choices[0].message.content;
-        if (content) {
+        const msg = j.choices && j.choices[0] && j.choices[0].message;
+        const content = msg && msg.content;
+        const toolCalls = msg && msg.tool_calls;
+        
+        if (toolCalls && toolCalls.length > 0) {
+          let toolHtml = "";
+          for (const tc of toolCalls) {
+            let argsDisplay = tc.function && tc.function.arguments || "{}";
+            try { argsDisplay = JSON.stringify(JSON.parse(argsDisplay), null, 2); } catch {}
+            toolHtml += `<div class="tool-call-block"><span class="tool-name">🔧 ${tc.function && tc.function.name || "tool"}</span><div class="tool-args">${argsDisplay.replace(/</g,"&lt;")}</div><div class="tool-status" style="color:var(--accent);">✓ เสร็จสิ้น</div></div>`;
+          }
+          assistantBubble.innerHTML = toolHtml;
+          chatHistory.push({ role: "assistant", content: null, tool_calls: toolCalls });
+          meta.textContent = "เรียกใช้ tool " + toolCalls.length + " ครั้ง";
+        } else if (content) {
           assistantText = content;
           assistantBubble.innerHTML = typeof marked !== 'undefined' ? marked.parse(assistantText) : assistantText;
+          chatHistory.push({ role: "assistant", content: assistantText });
         }
         meta.textContent = "OK " + (j.usage ? " | prompt:" + j.usage.prompt_tokens + " + completion:" + j.usage.completion_tokens + " = " + j.usage.total_tokens : "");
       }
-      chatHistory.push({ role: "assistant", content: assistantText });
       assistantBubble.classList.remove("streaming");
     } catch (e) {
       assistantBubble.textContent = "ข้อผิดพลาด: " + (e.message || e);

@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import datetime as dt
 import io
 import inspect
 import json
@@ -326,6 +327,31 @@ def _chunk_to_sse(chunk: dict[str, Any]) -> bytes:
 def _make_tool_callables(tools: list[ChatTool]) -> list[Any]:
     def _make_one(spec: ToolFunctionSpec):
         def _runner(**kwargs: Any) -> str:
+            # Built-in deterministic tools for demo / basic interoperability.
+            if spec.name == "get_current_date":
+                tz_name = kwargs.get("timezone") or kwargs.get("tz") or "UTC"
+                try:
+                    if isinstance(tz_name, str):
+                        from zoneinfo import ZoneInfo
+
+                        now = dt.datetime.now(ZoneInfo(tz_name))
+                    else:
+                        now = dt.datetime.now(dt.timezone.utc)
+                        tz_name = "UTC"
+                except Exception:
+                    now = dt.datetime.now(dt.timezone.utc)
+                    tz_name = "UTC"
+                return json.dumps(
+                    {
+                        "tool": spec.name,
+                        "timezone": tz_name,
+                        "iso_datetime": now.isoformat(),
+                        "date": now.strftime("%Y-%m-%d"),
+                        "time": now.strftime("%H:%M:%S"),
+                    },
+                    ensure_ascii=False,
+                )
+
             return json.dumps(
                 {
                     "tool": spec.name,
@@ -396,11 +422,24 @@ def _extract_city_from_text(text: str) -> str:
 def _resolve_requested_tool_name(body: ChatCompletionRequest) -> str | None:
     if not body.tools:
         return None
+    # If the latest message is already a tool result, generate final answer instead
+    # of issuing another tool call (prevents infinite tool-calling loops).
+    if body.messages and body.messages[-1].role == "tool":
+        return None
     available = {t.function.name for t in body.tools}
     first_name = body.tools[0].function.name
     choice = body.tool_choice
-    if choice is None or choice == "auto":
-        return first_name
+    # Respect OpenAI-style default behavior:
+    # if tool_choice is omitted, do not force tool calls.
+    if choice is None:
+        return None
+    if choice == "auto":
+        # Very light relevance gate for demo behavior:
+        # only call tool when user intent likely asks for date/time/weather.
+        text = _extract_last_user_text(body.messages).lower()
+        if any(k in text for k in ["date", "day", "time", "เวลา", "วันที่", "วันอะไร", "weather", "อากาศ"]):
+            return first_name
+        return None
     if isinstance(choice, str):
         if choice == "none":
             return None
@@ -459,6 +498,25 @@ def _build_openai_tool_call_response(
     }
 
 
+def _append_tools_grounding_system_message(
+    preface: list[dict[str, Any]], tools: list[ChatTool] | None
+) -> list[dict[str, Any]]:
+    if not tools:
+        return preface
+    names = [t.function.name for t in tools if t.function and t.function.name]
+    if not names:
+        return preface
+    tool_lines = "\n".join(f"- {name}" for name in names)
+    guard_text = (
+        "Tool policy:\n"
+        "1) If user asks which tools are available, list ONLY the tools below.\n"
+        "2) Do not claim capabilities beyond this list.\n"
+        "3) If user asks for unavailable tools, say it is unavailable.\n"
+        f"Available tools:\n{tool_lines}"
+    )
+    return [*preface, {"role": "system", "content": [{"type": "text", "text": guard_text}]}]
+
+
 async def stream_chat_completion(body: ChatCompletionRequest) -> AsyncIterator[bytes]:
     try:
         cid = f"chatcmpl-{uuid.uuid4().hex}"
@@ -496,6 +554,7 @@ async def stream_chat_completion(body: ChatCompletionRequest) -> AsyncIterator[b
 
         engine = get_engine()
         preface, last_msg = await _preface_and_last_payload(body.messages)
+        preface = _append_tools_grounding_system_message(preface, body.tools)
         tools_py: list[Any] = []
         if body.tools:
             tools_py = _make_tool_callables(body.tools)
@@ -568,6 +627,7 @@ async def nonstream_chat_completion(body: ChatCompletionRequest) -> dict[str, An
 
         engine = get_engine()
         preface, last_msg = await _preface_and_last_payload(body.messages)
+        preface = _append_tools_grounding_system_message(preface, body.tools)
         tools_py: list[Any] = []
         if body.tools:
             tools_py = _make_tool_callables(body.tools)

@@ -6,6 +6,8 @@ from app.services.model_service import (
     download_model,
     get_status,
 )
+from app.services.image_service import generate_image
+from app.services.audio_service import generate_speech, transcribe_audio
 
 __all__ = [
     "async_merged_catalog_entries",
@@ -16,4 +18,7 @@ __all__ = [
     "unload_model",
     "download_model",
     "get_status",
+    "generate_image",
+    "generate_speech",
+    "transcribe_audio",
 ]
