@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.staticfiles import StaticFiles
 
 from app.api.v1.router import api_router
 from app.core.config import MODEL_DOWNLOAD_ROOT
@@ -40,6 +41,10 @@ app.add_middleware(
 )
 
 app.include_router(api_router, prefix="/v1")
+
+_static_dir = os.path.join(os.path.dirname(__file__), "..", "static")
+if os.path.isdir(_static_dir):
+    app.mount("/static", StaticFiles(directory=_static_dir), name="static")
 
 
 @app.get("/", include_in_schema=False)
