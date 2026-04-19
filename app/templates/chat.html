@@ -24,7 +24,10 @@
     aside.sidebar {
       width: 280px; min-width: 260px; background: var(--sidebar);
       border-right: 1px solid var(--border); display: flex; flex-direction: column; padding: 0.85rem;
+      overflow-y: auto; max-height: 100vh;
+      scrollbar-width: none;
     }
+    aside.sidebar::-webkit-scrollbar { display: none; }
     .brand { font-weight: 700; font-size: 1rem; padding-bottom: 0.75rem; border-bottom: 1px solid var(--border); margin-bottom: 0.85rem; letter-spacing: 0.02em; }
     .brand span { color: var(--accent); }
     label.lbl { display: block; font-size: 0.72rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 0.35rem; }
@@ -59,6 +62,11 @@
       background: var(--bg); color: var(--text); font-size: 0.85rem;
     }
     textarea { min-height: 72px; resize: vertical; font-family: inherit; }
+    input[type="range"] { cursor: pointer; height: 6px; }
+    input[type="range"]::-webkit-slider-thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--accent); cursor: pointer; }
+    input[type="range"]::-moz-range-thumb { width: 16px; height: 16px; border-radius: 50%; background: var(--accent); cursor: pointer; border: none; }
+    .inner .row { margin-bottom: 0.55rem; }
+    .inner .row:last-child { margin-bottom: 0; }
     main.main {
       flex: 1; display: flex; flex-direction: column; min-width: 0; min-height: 0;
       padding: 0; margin: 0; width: 100%; max-width: none;
@@ -204,6 +212,54 @@
       </div>
       <label class="lbl" for="systemPrompt" style="margin-top:0.85rem">System prompt</label>
       <textarea id="systemPrompt" rows="3" placeholder="You are a helpful assistant." style="min-height:68px;font-size:0.82rem"></textarea>
+      <details class="adv" open>
+        <summary>Sampling Parameters</summary>
+        <div class="inner">
+          <div class="row">
+            <div>
+              <label class="lbl">Temperature: <span id="tempVal">1.0</span></label>
+              <input type="range" id="paramTemp" min="0" max="2" step="0.05" value="1.0" style="width:100%;accent-color:var(--accent)" />
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label class="lbl">Top P: <span id="topPVal">1.0</span></label>
+              <input type="range" id="paramTopP" min="0" max="1" step="0.05" value="1.0" style="width:100%;accent-color:var(--accent)" />
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label class="lbl">Top K: <span id="topKVal">40</span></label>
+              <input type="range" id="paramTopK" min="1" max="200" step="1" value="40" style="width:100%;accent-color:var(--accent)" />
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label class="lbl">Max Tokens: <span id="maxTokensVal">4096</span></label>
+              <input type="range" id="paramMaxTokens" min="64" max="8192" step="64" value="4096" style="width:100%;accent-color:var(--accent)" />
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label class="lbl">Frequency Penalty: <span id="freqPenVal">0</span></label>
+              <input type="range" id="paramFreqPen" min="-2" max="2" step="0.1" value="0" style="width:100%;accent-color:var(--accent)" />
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label class="lbl">Presence Penalty: <span id="presPenVal">0</span></label>
+              <input type="range" id="paramPresPen" min="-2" max="2" step="0.1" value="0" style="width:100%;accent-color:var(--accent)" />
+            </div>
+          </div>
+          <div class="row">
+            <div>
+              <label class="lbl">Seed (-1 = random)</label>
+              <input type="number" id="paramSeed" value="-1" style="width:100%;padding:0.35rem 0.5rem;border-radius:6px;border:1px solid var(--border);background:var(--bg);color:var(--text);font-size:0.85rem" />
+            </div>
+          </div>
+          <button type="button" class="secondary" id="btnResetParams" style="margin-top:0.35rem;width:100%">รีเซ็ตค่าเริ่มต้น</button>
+        </div>
+      </details>
       <details class="adv">
         <summary>ดาวน์โหลด / Admin token</summary>
         <div class="inner">
@@ -484,6 +540,44 @@
     return msgs;
   }
 
+  function getSamplingParams() {
+    const p = {
+      temperature: parseFloat($("paramTemp").value),
+      top_p: parseFloat($("paramTopP").value),
+      top_k: parseInt($("paramTopK").value, 10),
+      max_tokens: parseInt($("paramMaxTokens").value, 10),
+      frequency_penalty: parseFloat($("paramFreqPen").value),
+      presence_penalty: parseFloat($("paramPresPen").value),
+    };
+    const seed = parseInt($("paramSeed").value, 10);
+    if (seed >= 0) p.seed = seed;
+    return p;
+  }
+
+  function bindSlider(sliderId, displayId) {
+    const el = $(sliderId);
+    const disp = $(displayId);
+    if (!el || !disp) return;
+    el.addEventListener("input", function () { disp.textContent = el.value; });
+  }
+
+  bindSlider("paramTemp", "tempVal");
+  bindSlider("paramTopP", "topPVal");
+  bindSlider("paramTopK", "topKVal");
+  bindSlider("paramMaxTokens", "maxTokensVal");
+  bindSlider("paramFreqPen", "freqPenVal");
+  bindSlider("paramPresPen", "presPenVal");
+
+  $("btnResetParams").onclick = function () {
+    $("paramTemp").value = 1.0; $("tempVal").textContent = "1.0";
+    $("paramTopP").value = 1.0; $("topPVal").textContent = "1.0";
+    $("paramTopK").value = 40; $("topKVal").textContent = "40";
+    $("paramMaxTokens").value = 4096; $("maxTokensVal").textContent = "4096";
+    $("paramFreqPen").value = 0; $("freqPenVal").textContent = "0";
+    $("paramPresPen").value = 0; $("presPenVal").textContent = "0";
+    $("paramSeed").value = -1;
+  };
+
   function scrollChatToBottom() {
     const el = $("chatMessages");
     el.scrollTop = el.scrollHeight;
@@ -661,10 +755,11 @@
     let collectedToolCalls = {};
     try {
       const messages = buildApiMessages();
+      const sampling = getSamplingParams();
       const res = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: modelName(), messages, stream }),
+        body: JSON.stringify({ model: modelName(), messages, stream, ...sampling }),
       });
       if (!res.ok) {
         const t = await res.text();

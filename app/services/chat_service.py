@@ -17,7 +17,8 @@ import httpx
 import litert_lm
 from fastapi import HTTPException
 
-from app.core.engine import get_engine
+from app.core.engine import get_engine, ensure_engine_for_model
+from app.core.config import DEFAULT_TEMPERATURE, DEFAULT_TOP_P, DEFAULT_TOP_K, DEFAULT_MAX_TOKENS
 from app.schemas.chat import ChatCompletionRequest, ChatMessage, ChatTool, ToolFunctionSpec
 
 
@@ -29,6 +30,41 @@ class _AllowToolsHandler(litert_lm.ToolEventHandler):
         self, tool_response: dict[str, Any]
     ) -> dict[str, Any]:
         return tool_response
+
+
+def _resolve_sampling_params(body: ChatCompletionRequest) -> dict[str, Any]:
+    temperature = body.temperature if body.temperature is not None else DEFAULT_TEMPERATURE
+    top_p = body.top_p if body.top_p is not None else DEFAULT_TOP_P
+    top_k = body.top_k if body.top_k is not None else DEFAULT_TOP_K
+    max_tokens = body.max_completion_tokens or body.max_tokens or DEFAULT_MAX_TOKENS
+
+    sampling: dict[str, Any] = {}
+    if temperature is not None:
+        sampling["temperature"] = float(temperature)
+    if top_p is not None:
+        sampling["top_p"] = float(top_p)
+    if top_k is not None:
+        sampling["top_k"] = int(top_k)
+    if max_tokens is not None:
+        sampling["max_tokens"] = int(max_tokens)
+    if body.seed is not None:
+        sampling["random_seed"] = int(body.seed)
+    if body.frequency_penalty is not None:
+        sampling["frequency_penalty"] = float(body.frequency_penalty)
+    if body.presence_penalty is not None:
+        sampling["presence_penalty"] = float(body.presence_penalty)
+
+    return sampling
+
+
+def _resolve_extra_context(body: ChatCompletionRequest) -> dict[str, Any]:
+    ctx: dict[str, Any] = {}
+    sampling = _resolve_sampling_params(body)
+    if sampling:
+        ctx["sampling"] = sampling
+    if body.stop is not None:
+        ctx["stop"] = body.stop
+    return ctx
 
 
 def _data_url_to_blob(data_url: str) -> tuple[str, str | None]:
@@ -241,12 +277,10 @@ async def _openai_content_to_litert(
     return out if out else [{"type": "text", "text": ""}]
 
 
-def _strip_audio_from_litert_preface(preface: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """เอาเสียงออกจากข้อความใน preface — หลายเทิร์น (เสียงแล้วตามด้วยรูป) ทำให้ LiteRT รายงาน less audio than expected."""
+def _strip_media_from_litert_preface(preface: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
-    note = (
-        "[ผู้ใช้ส่งไฟล์เสียงในข้อความก่อนหน้า — ใช้บริบทจากข้อความผู้ช่วยถัดไปที่สรุป/ตอบจากเสียงนั้น]"
-    )
+    audio_note = "[ผู้ใช้ส่งไฟล์เสียงในข้อความก่อนหน้า]"
+    image_note = "[ผู้ใช้ส่งรูปภาพในข้อความก่อนหน้า]"
     for msg in preface:
         if msg.get("role") != "user":
             out.append(msg)
@@ -257,21 +291,31 @@ def _strip_audio_from_litert_preface(preface: list[dict[str, Any]]) -> list[dict
             continue
         new_parts: list[dict[str, Any]] = []
         had_audio = False
+        had_image = False
         for part in content:
             if not isinstance(part, dict):
                 continue
             if part.get("type") == "audio":
                 had_audio = True
                 continue
+            if part.get("type") == "image":
+                had_image = True
+                continue
             new_parts.append(part)
+        notes: list[str] = []
         if had_audio:
+            notes.append(audio_note)
+        if had_image:
+            notes.append(image_note)
+        if notes:
+            note_text = " ".join(notes)
             if not new_parts:
-                new_parts = [{"type": "text", "text": note}]
+                new_parts = [{"type": "text", "text": note_text}]
             elif new_parts[0].get("type") == "text":
                 t0 = new_parts[0].get("text") or ""
-                new_parts[0] = {"type": "text", "text": f"{note}\n{t0}"}
+                new_parts[0] = {"type": "text", "text": f"{note_text}\n{t0}"}
             else:
-                new_parts.insert(0, {"type": "text", "text": note})
+                new_parts.insert(0, {"type": "text", "text": note_text})
             out.append({**msg, "content": new_parts})
         else:
             out.append(msg)
@@ -552,17 +596,22 @@ async def stream_chat_completion(body: ChatCompletionRequest) -> AsyncIterator[b
                 yield b"data: [DONE]\n\n"
                 return
 
-        engine = get_engine()
+        engine = ensure_engine_for_model(body.model)
         preface, last_msg = await _preface_and_last_payload(body.messages)
         preface = _append_tools_grounding_system_message(preface, body.tools)
         tools_py: list[Any] = []
         if body.tools:
             tools_py = _make_tool_callables(body.tools)
 
+        sampling = _resolve_sampling_params(body)
+        extra_ctx = _resolve_extra_context(body)
+
         conv_kw: dict[str, Any] = {"messages": preface}
         if tools_py:
             conv_kw["tools"] = tools_py
             conv_kw["tool_event_handler"] = _AllowToolsHandler()
+        if extra_ctx:
+            conv_kw["extra_context"] = extra_ctx
 
         conversation = engine.create_conversation(**conv_kw)
         try:
@@ -623,19 +672,24 @@ async def nonstream_chat_completion(body: ChatCompletionRequest) -> dict[str, An
         if body.tools:
             tool_resp = _build_openai_tool_call_response(body, cid, created)
             if tool_resp is not None:
-                return tool_resp
+                return
 
-        engine = get_engine()
+        engine = ensure_engine_for_model(body.model)
         preface, last_msg = await _preface_and_last_payload(body.messages)
         preface = _append_tools_grounding_system_message(preface, body.tools)
         tools_py: list[Any] = []
         if body.tools:
             tools_py = _make_tool_callables(body.tools)
 
+        sampling = _resolve_sampling_params(body)
+        extra_ctx = _resolve_extra_context(body)
+
         conv_kw: dict[str, Any] = {"messages": preface}
         if tools_py:
             conv_kw["tools"] = tools_py
             conv_kw["tool_event_handler"] = _AllowToolsHandler()
+        if extra_ctx:
+            conv_kw["extra_context"] = extra_ctx
 
         conversation = engine.create_conversation(**conv_kw)
         full_text = ""
@@ -672,7 +726,7 @@ async def _preface_and_last_payload(
         raise HTTPException(400, detail="messages ว่างไม่ได้")
     last = messages[-1]
     if last.role == "user":
-        preface = _strip_audio_from_litert_preface(
+        preface = _strip_media_from_litert_preface(
             await _openai_messages_to_litert(messages[:-1])
         )
         content = await _openai_content_to_litert(last.content)
@@ -680,7 +734,7 @@ async def _preface_and_last_payload(
             content = _inject_silent_audio_for_vision_only_turn(content)
         return preface, {"role": "user", "content": content}
     if last.role == "tool":
-        preface = _strip_audio_from_litert_preface(
+        preface = _strip_media_from_litert_preface(
             await _openai_messages_to_litert(messages)
         )
         cont = {
@@ -689,7 +743,7 @@ async def _preface_and_last_payload(
         }
         return preface, cont
     if last.role == "assistant":
-        preface = _strip_audio_from_litert_preface(
+        preface = _strip_media_from_litert_preface(
             await _openai_messages_to_litert(messages[:-1])
         )
         cont = {"role": "user", "content": [{"type": "text", "text": "ตอบสานต่อจากข้อความผู้ช่วยล่าสุด"}]}
